@@ -5,6 +5,9 @@ __pycache__/
 *.so
 .Python
 .venv/
+.engine/
+.engine.pid
+.engine.log
 venv/
 env/
 .python-version

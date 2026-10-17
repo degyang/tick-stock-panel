@@ -20,6 +20,7 @@ from app.api import (
     data,
     events,
     ext_data,
+    ext_pages,
     factors,
     financials,
     indices,
@@ -39,10 +40,12 @@ from app.api import (
     signals,
     stock_analysis,
     strategy,
+    task_registry,
     watchlist,
 )
 from app.api import auth as auth_api
 from app.api import settings as settings_api
+from app.api import upgrade_guard as upgrade_guard_api
 from app.api.routes import router as core_router
 from app.config import settings
 from app.enriched_generation import EnrichedGenerationUnavailableError
@@ -108,6 +111,16 @@ async def _application_lifespan(app: FastAPI):
     repo = KlineRepository(store)
     app.state.datastore = store
     app.state.repo = repo
+    # 去内置化种子迁移必须赶在下方 refresh_cache 之前: enriched 缓存构建时
+    # 编译自定义信号表达式, 晚种会让本次启动的看板/梯队引用的 signal_limit_*
+    # 列缺失 (跌停恒 0、连板梯队无数据), 直到下一次缓存刷新才自愈。
+    _seeded_signals = 0
+    try:
+        from app.strategy import custom_signals as _cs_seed
+
+        _seeded_signals = _cs_seed.seed_if_empty(store.data_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("signal seeding failed (ignored): %s", e)
     # 自定义/复合因子载入注册表 (P3); 单个失败只跳过该因子 (fail-隔离)
     from app.factors.store import load_into_registry
 
@@ -150,6 +163,26 @@ async def _application_lifespan(app: FastAPI):
     capset = detect_capabilities()
     app.state.capabilities = capset
     logger.info("ready; %d capabilities active", len(capset.all()))
+    # 各能力的生效源与可用性: 切换数据源后一眼看出路由落点, 无需回设置页对照
+    try:
+        from app.data_providers.capabilities import resolve_capability_sources
+
+        for row in resolve_capability_sources():
+            logger.info(
+                "  能力路由 | %-8s ← %-12s %s",
+                row["label"],
+                row["source_display"],
+                "可用" if row["usable"] else "不可用",
+            )
+    except Exception as e:  # noqa: BLE001 — 仅日志, 失败不影响启动
+        logger.warning("能力路由日志输出失败: %s", e)
+
+    # 二次开发升级保护: 后台常备备份用户修改的程序文件 (无清单时自动停用)
+    from app.services.upgrade_guard import UpgradeGuard
+
+    upgrade_guard = UpgradeGuard(store.data_dir)
+    app.state.upgrade_guard = upgrade_guard
+    upgrade_guard.start_background_scan()
 
     # 全局行情服务
     qs = QuoteService()
@@ -253,6 +286,16 @@ async def _application_lifespan(app: FastAPI):
 
     _screener_svc = ScreenerService(repo)
     _etf_screener_svc = ScreenerService(repo, asset_type="etf")
+    # 去内置化补全(仅升级用户): 原内置策略按 ID 补回 custom (一次性,
+    # 已自行迁移的不覆盖; 新装无旧版使用痕迹, 跳过保持策略库为空)。
+    # 必须在 StrategyEngine 创建前完成, 否则首载拿不到刚补回的文件。
+    _seeded_strategies = 0
+    try:
+        from app.strategy.strategy_seeds import seed_missing_builtins
+
+        _seeded_strategies = seed_missing_builtins(store.data_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("strategy seeding failed (ignored): %s", e)
     strategy_dirs = [
         Path(__file__).resolve().parent / "strategy" / "research",
         store.data_dir / "strategies" / "custom",
@@ -263,18 +306,19 @@ async def _application_lifespan(app: FastAPI):
         strategy_dirs=strategy_dirs,
         override_loader=lambda sid: strategy_config.load_override(store.data_dir, sid),
     )
-    # 去内置化一次性迁移: ①信号目录为空时种入 20 个默认定义;
+    # 去内置化一次性迁移: ①信号目录缺种子时补入 20 个默认定义;
     # ②内置残留类加载失败 (composite 断链 / import 已删模块) 的策略文件
     #   自动归档出扫描目录并重载。摘要挂到 app.state 供前端提示一次。
     legacy_migration: dict = {}
     try:
-        from app.strategy import custom_signals as _cs
         from app.strategy.legacy_migrate import archive_unloadable_strategies
 
-        seeded = _cs.seed_if_empty(store.data_dir)
-        if seeded:
-            legacy_migration["seeded_signals"] = seeded
-            logger.info("legacy migrate: seeded %d default signals", seeded)
+        if _seeded_signals:
+            legacy_migration["seeded_signals"] = _seeded_signals
+            logger.info("legacy migrate: seeded %d default signals", _seeded_signals)
+        if _seeded_strategies:
+            legacy_migration["seeded_strategies"] = _seeded_strategies
+            logger.info("legacy migrate: seeded %d builtin strategies", _seeded_strategies)
         archived = archive_unloadable_strategies(strategy_engine.load_errors())
         if archived:
             strategy_engine.reload()
@@ -550,10 +594,13 @@ app.include_router(analysis.router)
 app.include_router(pipeline.router)
 app.include_router(data.router)
 app.include_router(ext_data.router)
+app.include_router(ext_pages.router)
+app.include_router(task_registry.router)
 app.include_router(financials.router)
 app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(settings_api.router)
+app.include_router(upgrade_guard_api.router)
 app.include_router(strategy.router)
 app.include_router(signals.router)
 app.include_router(monitor_rules.router)

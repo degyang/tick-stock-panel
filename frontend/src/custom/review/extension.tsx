@@ -20,6 +20,7 @@ import {
 
 import { api, type OverviewMarket, type AiReviewReport, type DragonTigerStockItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { copyText } from '@/lib/clipboard'
 import { cn } from '@/lib/cn'
 import { fmtPct, fmtVolume, priceColorClass } from '@/lib/format'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -208,10 +209,10 @@ export function ReviewPage() {
   const copyContent = useCallback(async () => {
     const text = viewing?.content ?? content
     if (!text) return
-    try {
-      await navigator.clipboard.writeText(text)
+    const ok = await copyText(text)
+    if (ok) {
       toast('已复制到剪贴板', 'success')
-    } catch {
+    } else {
       toast('复制失败,请手动选择文本', 'error')
     }
   }, [content, viewing])

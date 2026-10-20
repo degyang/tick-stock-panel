@@ -1242,3 +1242,32 @@ def test_strategy_engine_run_all_builds_one_shared_matrix():
     assert build.call_count == 1
     assert results["macd_golden"].total == 1
     assert results["macd_copy"].total == 1
+
+
+@pytest.mark.parametrize("batch_size", [1, 100])
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("conflict", [None, "close", "turnover_rate"])
+def test_direct_matrix_duplicate_rows(tmp_path, batch_size, cached, conflict):
+    day = date(2024, 1, 2)
+    root = tmp_path / "market"
+    partition = root / f"date={day}"
+    partition.mkdir(parents=True)
+    row = dict(symbol="000001.SZ", date=day, open=10.0, high=11.0,
+               low=9.0, close=10.0, volume=100.0, turnover_rate=float("nan"))
+    other = dict(row)
+    if conflict:
+        other[conflict] = 10.00000001
+    pl.DataFrame([row, other, row]).write_parquet(partition / "part.parquet")
+    kwargs = dict(field_columns={"turnover_rate"}, batch_size=batch_size,
+                  cache_root=tmp_path / "cache" if cached else None)
+    if conflict:
+        with pytest.raises(ValueError, match=r"2024-01-02.*000001\.SZ"):
+            load_market_data_matrix_from_parquet(root, day, day, **kwargs)
+    else:
+        market = load_market_data_matrix_from_parquet(root, day, day, **kwargs)
+        np.testing.assert_array_equal(market.close, [[10.0]])
+        np.testing.assert_array_equal(market.volume, [[100.0]])
+        assert np.isnan(market.field("turnover_rate")[0, 0])
+        if cached:
+            again = load_market_data_matrix_from_parquet(root, day, day, **kwargs)
+            assert again.cache_status == "exact"

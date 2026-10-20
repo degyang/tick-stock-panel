@@ -1367,6 +1367,7 @@ def _scan_matrix_values(
         use_threads=True,
     )
     flat_seen = seen.ravel()
+    validated_duplicates: set[int] = set()
     asset_count = len(actual_symbols)
     scan_targets = {
         "open": arrays["open"],
@@ -1381,8 +1382,26 @@ def _scan_matrix_values(
         time_ids = _arrow_axis_ids(_batch_column(batch, "date"), date_to_id)
         asset_ids = _arrow_axis_ids(_batch_column(batch, "symbol"), symbol_to_id)
         flat_ids = time_ids.astype(np.int64) * asset_count + asset_ids
-        if np.unique(flat_ids).size != flat_ids.size or flat_seen[flat_ids].any():
-            raise ValueError("MarketDataMatrix requires unique date/symbol rows")
+        unique_ids, counts = np.unique(flat_ids, return_counts=True)
+        duplicate_ids = unique_ids[(counts > 1) | flat_seen[unique_ids]]
+        for key in duplicate_ids:
+            if int(key) in validated_duplicates:
+                continue
+            current_date = actual_dates[int(key) // asset_count]
+            symbol = actual_symbols[int(key) % asset_count]
+            # Check source precision, before float32 conversion, including rows in
+            # other batches. Only duplicates pay for this targeted source read.
+            duplicates = dataset.to_table(
+                columns=scan_columns,
+                filter=(filter_expr & (pads.field("date") == pa.scalar(current_date))
+                        & (pads.field("symbol") == symbol)),
+            )
+            if pl.from_arrow(duplicates).unique().height != 1:
+                raise ValueError(
+                    f"行情数据存在冲突的重复记录: {current_date} / {symbol}，"
+                    "请重新同步对应日期的日K并重算指标"
+                )
+            validated_duplicates.add(int(key))
         flat_seen[flat_ids] = True
         for name, target in scan_targets.items():
             values = _arrow_float_values(

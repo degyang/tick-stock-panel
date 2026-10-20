@@ -380,3 +380,33 @@ def test_worker_error_message_translates_publishing_error() -> None:
     )
     assert translated == "指标数据正在发布更新，请稍后重试"
     assert _error_message(ValueError("boom")) == "boom"
+
+
+def test_publication_collapses_identical_rows_before_matrix_read(tmp_path) -> None:
+    from app.backtest.matrix import build_market_data_matrix
+
+    frame = _frame().with_columns(pl.lit(float('nan')).alias('turnover_rate'))
+    out = tmp_path / 'kline_daily_enriched' / 'date=2026-08-14' / 'part.parquet'
+    publication = EnrichedPublication(tmp_path)
+    publication.write_parquet(pl.concat([frame] * 4), out)
+    publication.commit()
+    stored = pl.read_parquet(out)
+    assert stored.height == 1
+    market = build_market_data_matrix(stored)
+    assert market.close[0, 0] == 10.0
+    assert market.volume[0, 0] == 1000.0
+
+
+@pytest.mark.parametrize('column', ['close', 'turnover_rate'])
+def test_publication_rejects_conflicting_keys_without_replacing_file(tmp_path, column) -> None:
+    frame = _frame().with_columns(pl.lit(10.0).alias('turnover_rate'))
+    out = tmp_path / 'kline_daily_enriched' / 'date=2026-08-14' / 'part.parquet'
+    publication = EnrichedPublication(tmp_path)
+    publication.write_parquet(frame, out)
+    generation = publication.commit()
+    original = out.read_bytes()
+    conflict = frame.with_columns(pl.lit(10.00000001).alias(column))
+    with pytest.raises(ValueError, match=r'2026-08-14.*000001\.SZ'):
+        publication.write_parquet(pl.concat([frame, conflict]), out)
+    assert out.read_bytes() == original
+    assert get_enriched_generation(tmp_path) == generation

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -13,6 +14,7 @@ from typing import Any, BinaryIO
 
 import polars as pl
 
+logger = logging.getLogger(__name__)
 
 class EnrichedGenerationUnavailableError(RuntimeError):
     """The enriched dataset has no stable generation available for readers."""
@@ -303,6 +305,20 @@ class EnrichedPublication:
         self._publishing = False
 
     def write_parquet(self, df: pl.DataFrame, out: Path) -> None:
+        # Preserve the matrix key contract before publishing or changing generation.
+        # Compare source precision across all fields; never choose between conflicts.
+        keys = ["date", "symbol"]
+        if df.select(keys).is_duplicated().any():
+            original_rows = df.height
+            df = df.unique(maintain_order=True)
+            conflicts = df.select(keys).is_duplicated()
+            if conflicts.any():
+                day, symbol = df.filter(conflicts).select(keys).row(0)
+                raise ValueError(
+                    f"指标数据存在冲突的重复记录: {day} / {symbol}，请重新同步日K并重算指标"
+                )
+            logger.warning("Enriched publication removed %d identical rows: %s",
+                           original_rows - df.height, out)
         out.parent.mkdir(parents=True, exist_ok=True)
         temporary = out.with_name(f".{out.name}.{uuid.uuid4().hex}.tmp")
         try:

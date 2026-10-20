@@ -1072,6 +1072,24 @@ def sync_minute_batch(
         不进入全局 out → 内存峰值从「全量」降到「单段」。适用于 sync_and_persist_minute。
         不传时 (如 get_minute_batch 的实时补拉) 保持原契约: 累积进 out 末尾一次性返回。
     """
+    if on_segment is not None:
+        provider_name = preferences.get_minute_data_provider()
+        provider, fallback, _ = _resolve_minute_provider(provider_name)
+        iterator = getattr(provider, "iter_minute", None) if not fallback else None
+        if callable(iterator):
+            # Do not materialize get_minute's full-market result before persisting.
+            # A failed stream must fail the job, never fall back after partial writes.
+            callback = (lambda cur, total: on_chunk_done(cur, total, "custom")) if on_chunk_done else None
+            with contextlib.closing(iterator(
+                symbols, start_time=start_time, end_time=end_time,
+                asset_type=asset_type, freq="1m", on_chunk_done=callback,
+            )) as chunks:
+                for chunk in chunks:
+                    chunk = _enforce_minute_beijing_wallclock(chunk, source=provider_name)
+                    if not chunk.is_empty():
+                        on_segment(chunk)
+            return pl.DataFrame()
+
     df, fallback = _try_custom_minute(
         symbols, start_time=start_time, end_time=end_time,
         asset_type=asset_type, freq="1m", on_chunk_done=on_chunk_done,
@@ -1712,7 +1730,9 @@ def sync_and_persist_minute(
             calendar_days = int(days * 7 / 5) + 5
             start_time = now - timedelta(days=calendar_days)
         elif last_dt:
-            start_time = last_dt
+            # A global maximum does not prove every symbol has that day's bars.
+            # Replay the latest session and upsert, including corrected source bars.
+            start_time = last_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         else:
             start_time = now - timedelta(days=days)
         end_time = now
@@ -1735,6 +1755,8 @@ def sync_and_persist_minute(
         # 替换仍被另一写入占用的临时文件,因此读-改-写必须复用仓库写锁。
         with repo._write_lock:
             written_box[0] += _write_minute_partition(seg_df, minute_dir)
+        from app.services import sector_rotation
+        sector_rotation.invalidate_cache()
 
     segment_days = preferences.get_minute_sync_segment_days()
     sync_minute_batch(

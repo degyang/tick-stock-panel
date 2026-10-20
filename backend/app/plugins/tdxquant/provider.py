@@ -263,6 +263,9 @@ def _minute_dt(compact_date, hhmmss) -> datetime | None:
     if d is None:
         return None
     t = str(hhmmss or "").strip()
+    # SDK 会省略早盘小时的前导零，例如 09:31:00 返回 "93100"。
+    if len(t) == 5 and t.isdigit():
+        t = t.zfill(6)
     if len(t) < 6 or not t[:6].isdigit():
         return None
     try:
@@ -600,7 +603,12 @@ class TdxQuantProvider:
                 on_chunk_done(0, 0)
             return
         client = self._get_client()
-        end_dt = end_time or datetime.now()
+        # 查询边界与分钟行统一为北京墙钟，先转换时区再移除标记。
+        if start_time is not None and start_time.tzinfo is not None:
+            start_time = start_time.astimezone(_BEIJING).replace(tzinfo=None)
+        end_dt = end_time or datetime.now(_BEIJING)
+        if end_dt.tzinfo is not None:
+            end_dt = end_dt.astimezone(_BEIJING).replace(tzinfo=None)
         count = _minute_count_for_window(start_time, end_dt)
         for i, symbol in enumerate(symbols):
             try:

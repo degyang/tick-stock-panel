@@ -56,6 +56,8 @@ def _setup_custom_provider(monkeypatch, provider: object, has_dataset: bool = Tr
     - custom.provider_has_dataset → has_dataset
     - custom.get_provider → provider
     """
+    # These fixtures model the original get_minute-only provider contract.
+    provider.iter_minute = None
     monkeypatch.setattr(
         kline_sync.preferences,
         "get_minute_data_provider",

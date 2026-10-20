@@ -1,0 +1,11 @@
+name: ageman
+display_name: "ageman 分钟行情"
+runtime: python
+entry: app.plugins.ageman.provider:AgemanProvider
+check: app.plugins.ageman.provider:availability
+datasets: [minute, full_minute]
+description: "ageman 公开 SDK：股票、市场及板块指数原生分钟 K；ETF 暂不支持。"
+install_hint: "安装 ageman 0.1.23 wheel（Python 3.12+），详见插件开发文档。"
+usage_notes:
+  - "按交易日逐标的读取，流式同步逐批落盘，不在内存中累积全市场历史。"
+  - "历史深度受来源保留窗口限制；不完整窗口明确报错。"

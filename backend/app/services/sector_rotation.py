@@ -440,9 +440,10 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
     if has_amount:
         stock_agg.append(pl.col("amount").sum().alias("_sym_amt"))
     by_sector = (
-        buckets.join(member_df, on="_bare", how="inner")
-        .group_by(["_bucket", "_member", "_bare"])
-        .agg(stock_agg)
+        # Collapse each stock's minute bucket before expanding board membership.
+        # This preserves equal stock weights without multiplying every minute row.
+        buckets.group_by(["_bucket", "_bare"]).agg(stock_agg)
+        .join(member_df, on="_bare", how="inner")
         .group_by(["_bucket", "_member"])
         .agg(
             pl.col("_sym_pct").mean().alias("_spct"),

@@ -504,6 +504,23 @@ def test_minute_units_and_wallclock_datetime():
     assert rows[1]["amount"] == pytest.approx(48_696_200.0)  # 万元 → 元
 
 
+@pytest.mark.parametrize("clock", ["93100", 93100, "093100"])
+def test_minute_preserves_early_session_bars(clock):
+    fake = _FakeClient()
+    fake.his = {"600519.SH": _minute_raw([
+        ("20261016", clock, 10.0, 10.0, 10.0, 10.0, 100.0, 0.1),
+    ])}
+    df = _provider(fake).get_minute(
+        ["600519.SH"], datetime(2026, 10, 16, 9, 25), datetime(2026, 10, 16, 15, 5),
+    )
+    assert df["datetime"].to_list() == [datetime(2026, 10, 16, 9, 31)]
+
+
+@pytest.mark.parametrize("clock", [None, "", "bad", "931", "256100"])
+def test_minute_rejects_invalid_clock(clock):
+    assert tp._minute_dt("20261016", clock) is None
+
+
 def test_minute_window_filter_and_gap_skip():
     fake = _FakeClient()
     fake.his = {"600519.SH": _minute_raw([
@@ -516,6 +533,31 @@ def test_minute_window_filter_and_gap_skip():
     )
     assert df.height == 1
     assert df.to_dicts()[0]["datetime"] == datetime(2026, 10, 9, 9, 31, 0)
+
+
+@pytest.mark.parametrize("tz", [None, _BEIJING, ZoneInfo("UTC")])
+def test_minute_window_timezone_normalization(tz):
+    fake = _FakeClient()
+    fake.his = {"600519.SH": _minute_raw([
+        ("20261009", clock, 10.0, 10.0, 10.0, 10.0, 100.0, 0.1)
+        for clock in ("093000", "093100", "093200", "093300")
+    ])}
+    start = datetime(2026, 10, 9, 9, 31, tzinfo=_BEIJING)
+    end = datetime(2026, 10, 9, 9, 32, tzinfo=_BEIJING)
+    start = start.astimezone(tz) if tz else start.replace(tzinfo=None)
+    end = end.astimezone(tz) if tz else end.replace(tzinfo=None)
+    df = _provider(fake).get_minute(["600519.SH"], start, end)
+    assert df["datetime"].to_list() == [
+        datetime(2026, 10, 9, 9, 31), datetime(2026, 10, 9, 9, 32),
+    ]
+    assert fake.his_calls[0]["end"] == date(2026, 10, 9)
+
+
+def test_minute_utc_end_uses_beijing_date():
+    fake = _FakeClient()
+    end = datetime(2026, 10, 8, 17, tzinfo=ZoneInfo("UTC"))
+    assert _provider(fake).get_minute(["600519.SH"], None, end).is_empty()
+    assert fake.his_calls[0]["end"] == date(2026, 10, 9)
 
 
 def test_minute_freq_and_asset_guards():

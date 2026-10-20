@@ -1214,7 +1214,9 @@ def refresh_views(request: Request):
 async def sync_minute(request: Request):
     """手动触发分钟 K 同步(全市场)。返回 pipeline job_id 可轮询进度。
 
-    body 可选: { "days": int } — 指定拉取天数 (不传则用偏好设置)。
+    body 可选: { "days": int, "extend": bool, "force_full_days": bool }。
+    force_full_days=True 忽略全库最新时间，按已有近期回补窗口拉取并合并，
+    days 限 1–30，不能与 extend 同用；默认保持原增量行为。
     """
     # 可选 body: { "days": int, "extend": bool }
     # days: 拉取天数; extend: 向前扩展模式 (从最早数据往前补)
@@ -1228,10 +1230,11 @@ async def sync_minute(request: Request):
         request.app.state.capabilities,
         override_days=body.get("days"),
         extend_flag=body.get("extend"),
+        force_full_days=body.get("force_full_days", False),
     )
 
 
-async def trigger_minute_sync(repo, capset, *, override_days=None, extend_flag=None) -> dict:
+async def trigger_minute_sync(repo, capset, *, override_days=None, extend_flag=None, force_full_days=False) -> dict:
     """触发分钟K同步/向前扩展后台任务(HTTP 端点与 AI 助手共用同一条触发路径)。"""
     import asyncio
 
@@ -1246,6 +1249,17 @@ async def trigger_minute_sync(repo, capset, *, override_days=None, extend_flag=N
     from app.services.preferences import get_minute_sync_days
     from app.tickflow.capabilities import Cap
     from app.tickflow.pools import get_pool
+
+    if not isinstance(force_full_days, bool):
+        raise HTTPException(status_code=400, detail="force_full_days 必须为布尔值")
+    if force_full_days:
+        if extend_flag:
+            raise HTTPException(status_code=400, detail="近期回补不能同时向前扩展历史")
+        if override_days is not None and (
+            isinstance(override_days, bool) or not isinstance(override_days, int)
+            or not 1 <= override_days <= 30
+        ):
+            raise HTTPException(status_code=400, detail="近期回补 days 必须为 1 到 30 的整数")
 
     if not _minute_allowed(capset):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限")
@@ -1293,6 +1307,7 @@ async def trigger_minute_sync(repo, capset, *, override_days=None, extend_flag=N
                 return kline_sync.sync_and_persist_minute(
                     universe, repo, capset, days=days,
                     extend_backward=extend_backward,
+                    force_full_days=force_full_days,
                     on_chunk_done=_on_chunk,
                 )
 

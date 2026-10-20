@@ -3,7 +3,7 @@
 import asyncio
 from datetime import date, datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import polars as pl
 import pytest
@@ -111,3 +111,58 @@ def test_sync_minute_single_rejects_invalid_days():
             _request(),
             {"symbol": "600000.SH", "days": 0},
         ))
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_market_minute_sync_forwards_backfill_mode(monkeypatch, tmp_path, force):
+    from app.services import pipeline_jobs
+
+    repo = MagicMock()
+    repo.store.data_dir = tmp_path
+    repo.get_index_symbol_set.return_value = set()
+    sync = MagicMock(return_value=2400)
+    jobs = MagicMock()
+    jobs.create.return_value = ("test-job", True)
+    monkeypatch.setattr(pipeline_jobs, "job_store", jobs)
+    monkeypatch.setattr(pipeline_jobs, "try_acquire_run_slot", lambda _: True)
+    monkeypatch.setattr(pipeline_jobs, "release_run_slot", lambda _: None)
+    monkeypatch.setattr(pipeline_jobs, "run_with_capacity", lambda _, fn: fn())
+    monkeypatch.setattr("app.tickflow.pools.get_pool", lambda _: ["600000.SH"])
+    monkeypatch.setattr("app.jobs.daily_pipeline._refresh_single_view", MagicMock())
+    monkeypatch.setattr("app.api.data.invalidate_storage_cache", MagicMock())
+    monkeypatch.setattr(kline_api, "_minute_allowed", lambda _: True)
+    monkeypatch.setattr(kline_api.kline_sync, "sync_and_persist_minute", sync)
+    pending = []
+    monkeypatch.setattr(asyncio, "create_task", pending.append)
+    request = _request(repo)
+    request.json = AsyncMock(return_value={"days": 12, "force_full_days": force})
+
+    async def run():
+        result = await kline_api.sync_minute(request)
+        assert result == {"status": "started", "job_id": "test-job"}
+        await pending.pop()
+
+    asyncio.run(run())
+    assert sync.call_args.kwargs["force_full_days"] is force
+    assert sync.call_args.kwargs["days"] == 12
+    assert sync.call_args.kwargs["extend_backward"] is False
+    jobs.succeed.assert_called_once()
+
+
+@pytest.mark.parametrize("body", [
+    {"force_full_days": "true"},
+    {"force_full_days": True, "extend": True},
+    {"force_full_days": True, "days": 365},
+    {"force_full_days": True, "days": 0},
+])
+def test_market_minute_backfill_rejects_invalid_options(body, monkeypatch):
+    from app.services import pipeline_jobs
+
+    jobs = MagicMock()
+    jobs.create.side_effect = AssertionError("Invalid options must not create a job")
+    monkeypatch.setattr(pipeline_jobs, "job_store", jobs)
+    request = _request()
+    request.json = AsyncMock(return_value=body)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(kline_api.sync_minute(request))
+    assert exc.value.status_code == 400

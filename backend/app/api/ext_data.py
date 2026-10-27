@@ -115,10 +115,21 @@ class PullConfigReq(BaseModel):
     # 日内序列表时间列名 (字段映射后的列名, 如 "ts"): 配置后同 symbol 允许多行,
     # 按 [symbol, time_field] 去重; 留空 = 每日快照表 (按 symbol 去重)
     time_field: str | None = Field(None, max_length=32)
+    # 增量续传参数名 (如 "since"): 每次拉取自动带上本地目标日分区 time_field 的
+    # 最大值, 源只返回其后数据 (盘中多盘表免全量重拉); 需先配置 time_field
+    since_param: str | None = Field(None, min_length=1, max_length=16, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     # 鉴权方式; 请求中缺省 (None) = 保留现有配置, {"type":"none"} = 关闭鉴权
     auth: PullAuthReq | None = None
     # 单次拉取请求超时 (秒), 默认 30 与历史行为一致; 大响应接口可调高
     timeout_seconds: int = Field(30, ge=5, le=300)
+    # ── 分页协议 (仅 GET; 页码经 query 参数传递) ──
+    # 必须与本类其它字段一样显式声明: Pydantic 默认忽略未声明键, 前端保存时
+    # 提交的 page_param/page_size_* 会被静默丢弃, 回读退化成单次请求。
+    page_param: str | None = Field(None, max_length=64)
+    page_size_param: str | None = Field(None, max_length=64)
+    page_size: int = Field(0, ge=0)
+    page_start: int = Field(1, ge=0)
+    max_pages: int = Field(20, ge=1, le=200)
     # 两级拉取配方 (目录 → 逐条目明细); 缺省 (None) = 保留现有配置
     fanout: dict | None = None
 
@@ -406,6 +417,53 @@ def _date_range(config: ExtConfig, data_dir: Path) -> list[str] | None:
     return [dates[0], dates[-1]]
 
 
+def _plate_stats(config: ExtConfig, data_dir: Path) -> dict | None:
+    """日内多盘表最新分区的盘次概览 (源卡片展示用)。
+
+    只读最新分区的时间列: 盘数 = 时刻值去重计数, from/to = 时刻范围 (HH:MM:SS,
+    与 collapse_ext_rows_at 的时刻切片同口径, 兼容 ISO 前缀/纯时刻两种列)。
+    非多盘表 (非 timeseries 或未配 time_field)、无分区、列缺失或文件损坏 → None。
+    """
+    if config.mode != "timeseries":
+        return None
+    tf = config.pull.time_field if config.pull else None
+    if not tf:
+        return None
+    base = _ext_data_dir(config, data_dir)
+    if not base.exists():
+        return None
+    parts = sorted(
+        d.name[5:] for d in base.iterdir()
+        if d.is_dir() and d.name.startswith("date=") and (d / "part.parquet").exists()
+    )
+    if not parts:
+        return None
+    try:
+        col = pl.read_parquet(
+            base / f"date={parts[-1]}" / "part.parquet", columns=[tf]
+        )[tf].cast(pl.Utf8)
+    except Exception:  # noqa: BLE001 — 列缺失/文件损坏 → 无多盘信息, 不阻断列表
+        return None
+    if col.is_empty():
+        return None
+    tod = (
+        pl.DataFrame({tf: col})
+        .select(
+            pl.when(pl.col(tf).str.len_chars() >= 11)
+            .then(pl.col(tf).str.slice(11, 8))
+            .otherwise(pl.col(tf))
+            .alias("_tod")
+        )
+        .select(
+            plates=pl.col("_tod").n_unique(),
+            first=pl.col("_tod").min(),
+            last=pl.col("_tod").max(),
+        )
+        .row(0, named=True)
+    )
+    return {"date": parts[-1], "plates": tod["plates"], "from": tod["first"], "to": tod["last"]}
+
+
 @router.get("")
 def list_configs(request: Request):
     """列出所有扩展数据配置。"""
@@ -416,6 +474,7 @@ def list_configs(request: Request):
         d = c.to_dict()
         d["latest_sync_date"] = _latest_sync_date(c, data_dir)
         d["date_range"] = _date_range(c, data_dir)
+        d["plate"] = _plate_stats(c, data_dir)
         items.append(d)
     return {"items": items}
 
@@ -1049,8 +1108,14 @@ def configure_pull(request: Request, config_id: str, body: PullConfigReq):
         date_param=body.date_param,
         date_format=body.date_format,
         time_field=body.time_field,
+        since_param=body.since_param,
         auth=new_auth,
         timeout_seconds=body.timeout_seconds,
+        page_param=body.page_param,
+        page_size_param=body.page_size_param,
+        page_size=body.page_size,
+        page_start=body.page_start,
+        max_pages=body.max_pages,
         fanout=body.fanout if body.fanout is not None else (old_pull.fanout if old_pull else None),
         last_run=old_pull.last_run if old_pull else None,
         last_status=old_pull.last_status if old_pull else None,
@@ -1421,6 +1486,27 @@ async def detect_url(body: DetectUrlReq):
     }
 
 
+def _describe_parquet_columns(glob: str) -> list[tuple[str, str]]:
+    """读取 Parquet 的 (列名, 类型), 类型用 DuckDB 类型名 (DOUBLE/BIGINT/VARCHAR…)。
+
+    DESCRIBE 的输出列名随 DuckDB 版本变化: 1.4 及以前是 data_type, 1.5 起是
+    column_type。写死任一名字都会在另一版本整体抛 BinderException, 使 schema
+    端点静默退回配置字段 (列对象只有 dtype 没有 type), 前端按 type 判断数值列
+    的下拉随之变空。这里按实际输出列名取值, 两个版本都可用。
+    """
+    import duckdb
+
+    # hive_partitioning=false: 时序表目录名形如 date=YYYY-MM-DD, DuckDB 默认据此
+    # 推断分区并在真实列之外多出一个 date 列, 污染列选择器里的扩展字段。
+    rel = duckdb.query(
+        f"DESCRIBE SELECT * FROM read_parquet('{glob}', union_by_name=true, hive_partitioning=false)"
+    )
+    names = rel.columns
+    type_idx = names.index("column_type" if "column_type" in names else "data_type")
+    name_idx = names.index("column_name")
+    return [(row[name_idx], row[type_idx]) for row in rel.fetchall()]
+
+
 @router.get("/schema/{config_id}")
 def discover_schema(request: Request, config_id: str):
     """发现扩展数据的实际 Parquet schema（基于已有数据）。"""
@@ -1432,14 +1518,15 @@ def discover_schema(request: Request, config_id: str):
     glob = _parquet_glob(config, data_dir)
 
     try:
-        import duckdb
-        rows = duckdb.query(
-            f"SELECT column_name, data_type FROM (DESCRIBE SELECT * FROM read_parquet('{glob}', union_by_name=true))"
-        ).fetchall()
-        return {"columns": [{"name": r[0], "type": r[1]} for r in rows]}
+        return {"columns": [
+            {"name": name, "type": dtype}
+            for name, dtype in _describe_parquet_columns(glob)
+        ]}
     except Exception:
-        # 无数据时返回配置中定义的字段
-        return {"columns": [f.to_dict() for f in config.fields]}
+        # 无数据时返回配置中定义的字段 — 键名与真实 schema 对齐 (type 而非 dtype)
+        return {"columns": [
+            {"name": f.name, "type": f.dtype, "label": f.label} for f in config.fields
+        ]}
 
 
 @router.get("/schema-all")
@@ -1452,14 +1539,15 @@ def discover_all_schemas(request: Request):
         glob = _parquet_glob(config, data_dir)
 
         try:
-            import duckdb
-            cols = duckdb.query(
-                f"SELECT column_name, data_type FROM (DESCRIBE SELECT * FROM read_parquet('{glob}', union_by_name=true))"
-            ).fetchall()
             field_labels = {f.name: f.label for f in config.fields}
-            columns = [{"name": r[0], "type": r[1], "label": field_labels.get(r[0], r[0])} for r in cols]
+            columns = [
+                {"name": name, "type": dtype, "label": field_labels.get(name, name)}
+                for name, dtype in _describe_parquet_columns(glob)
+            ]
         except Exception:
-            columns = [f.to_dict() for f in config.fields]
+            columns = [
+                {"name": f.name, "type": f.dtype, "label": f.label} for f in config.fields
+            ]
 
         result.append({
             "id": config.id,

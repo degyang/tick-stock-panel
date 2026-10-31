@@ -7,6 +7,7 @@ import { ToastContainer, toast } from '@/components/Toast'
 import { AlertToastContainer } from '@/components/AlertToast'
 import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
 import { AiReportBubble } from '@/components/financials/AiReportBubble'
+import { DailyDataHealthNotice } from '@/components/data/DailyDataHealthNotice'
 import { StockAnalysisHost } from '@/components/stock-analysis/StockAnalysisHost'
 import { StockAnalysisBubble } from '@/components/stock-analysis/StockAnalysisBubble'
 import {
@@ -667,6 +668,8 @@ export function Layout() {
     const fresh = await qc.fetchQuery({
       queryKey: QK.quoteStatus,
       queryFn: api.quoteStatus,
+      // 刚切换到 fuyao 等源时, 全局 staleTime 内仍可能缓存旧源的权限。
+      staleTime: 0,
     })
     if (!fresh.realtime_allowed) {
       toast('当前数据源无实时行情能力, 请先配置数据源', 'error')
@@ -1145,6 +1148,7 @@ export function Layout() {
             与服务连接已断开 · 正在重连
           </div>
         )}
+        <DailyDataHealthNotice />
         <Suspense
           fallback={
             <div className="flex items-center justify-center py-24">

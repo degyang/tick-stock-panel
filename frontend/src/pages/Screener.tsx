@@ -24,6 +24,7 @@ import type { MiniIntradayYMode } from '@/components/stock-table/MiniIntraday'
 import { ScreenerFilter as ScreenerFilterType, defaultFilter, filterActive, countActiveFilters, applyFilter, FilterPanel } from '@/components/screener/ScreenerFilter'
 import { StrategySettingsDialog } from '@/components/screener/StrategySettingsDialog'
 import { DefaultStrategyParamsDialog } from '@/components/screener/DefaultStrategyParamsDialog'
+import { ResourceTransferButton } from '@/components/ResourceTransferDialog'
 import { StrategyPoolDialog } from '@/components/screener/StrategyPoolDialog'
 import { StrategyBuilderDialog } from '@/components/screener/StrategyBuilderDialog'
 import { StrategyStoreDialog } from '@/components/screener/StrategyStoreDialog'
@@ -657,7 +658,7 @@ export function Screener() {
     [columns],
   )
   const extChartColsKey = extChartColumns
-    .map(c => `${(c.source as { configId: string }).configId}.${(c.source as { fieldName: string }).fieldName}`)
+    .map(c => `${(c.source as { configId: string }).configId}.${(c.source as { fieldName: string }).fieldName}:${c.extDisplay?.chartDays ?? 10}`)
     .join(',')
   const extChartSymbolsKey = useMemo(
     () => [...new Set(displayRows.map((r: any) => r.symbol as string))].sort().join(','),
@@ -669,7 +670,7 @@ export function Screener() {
       const symbols = extChartSymbolsKey ? extChartSymbolsKey.split(',') : []
       const entries = await Promise.all(extChartColumns.map(async c => {
         const src = c.source as { type: 'ext'; configId: string; fieldName: string }
-        const r = await api.extDataSeries(src.configId, src.fieldName, asOf || undefined, symbols)
+        const r = await api.extDataSeries(src.configId, src.fieldName, asOf || undefined, symbols, c.extDisplay?.chartDays || 10)
         return [`${src.configId}.${src.fieldName}`, r.items ?? {}] as const
       }))
       return Object.fromEntries(entries) as Record<string, Record<string, [string, number][]>>
@@ -1009,15 +1010,18 @@ export function Screener() {
               </button>
             )}
             {/* 默认基础参数: 之后新建策略默认使用的基础过滤配置 */}
-            <button
-              onClick={() => setShowDefaultParams(true)}
-              title="默认基础参数 — 新建策略默认使用的基础过滤配置"
-              className="inline-flex items-center justify-center h-7 w-7 rounded-btn
-                border border-border bg-surface text-muted
-                hover:text-accent hover:border-accent/50 transition-colors cursor-pointer"
-            >
-              <SlidersHorizontal className="h-3.5 w-3.5" />
-            </button>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <ResourceTransferButton kind="strategy" />
+              <button
+                onClick={() => setShowDefaultParams(true)}
+                title="默认基础参数 — 新建策略默认使用的基础过滤配置"
+                className="inline-flex items-center justify-center h-7 w-7 rounded-btn
+                  border border-border bg-surface text-muted
+                  hover:text-accent hover:border-accent/50 transition-colors cursor-pointer"
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
         }
       />

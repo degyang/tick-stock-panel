@@ -355,6 +355,11 @@ def _open_window(url: str) -> None:
     """主线程: 用 pywebview 打开桌面窗口。"""
     import webview  # type: ignore[import-not-found]
 
+    from app.config import settings
+
+    # 默认隐私模式会在退出后丢弃 localStorage；用户目录中的固定 profile 才能跨重启保留。
+    storage_path = settings.data_dir / "webview"
+    storage_path.mkdir(parents=True, exist_ok=True)
     # pywebview 5.0 起默认取消所有文件下载 (Edge WebView2 / WKWebView 一致):
     # 配置备份导出、回测 CSV 等 <a download> 直链会点击无反应, 必须在 start() 前显式开启。
     webview.settings["ALLOW_DOWNLOADS"] = True
@@ -368,7 +373,10 @@ def _open_window(url: str) -> None:
         confirm_close=False,
     )
     # 继承隐藏启动标志时首次显示可能被抑制, GUI 就绪后再显式显示 (同失败页)。
-    webview.start(lambda: window.show(), debug=False)
+    webview.start(
+        lambda: window.show(), debug=False,
+        private_mode=False, storage_path=str(storage_path),
+    )
 
 
 def _open_static_window(html_text: str) -> None:
@@ -415,6 +423,12 @@ def main() -> int:
             return 0
         instance_acquired = True
 
+        # Restore before app.main imports or its startup log reads Key/prefs.
+        from app.config import settings
+        from app.services.data_dir_upgrade import recover_desktop_data
+
+        recover_desktop_data(settings.data_dir)
+
         # 撞挖掘锁只降级, 其他预检异常必须同样落盘、弹框并释放桌面锁。
         conflict = _precheck_mining_lock()
         if conflict is not None:
@@ -439,6 +453,13 @@ def main() -> int:
                 if ready.is_set() else None
             )
             logger.error("后端未就绪 (reason=%s), 桌面版退出", reason)
+            if not ready.is_set():
+                frame = sys._current_frames().get(server_thread.ident)
+                if frame is not None:
+                    logger.error(
+                        "启动超时，后端线程调用栈:\n%s",
+                        "".join(traceback.format_stack(frame)),
+                    )
             _open_static_window(_failed_html(reason))
             return 1
 

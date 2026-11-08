@@ -108,8 +108,11 @@ def test_stream_persists_before_requesting_next_chunk(monkeypatch):
     provider = SimpleNamespace(iter_minute=iterator)
     monkeypatch.setattr(kline_sync, "_resolve_minute_provider", lambda _: (provider, False, None))
     monkeypatch.setattr(kline_sync.preferences, "get_minute_data_provider", lambda: "ageman")
-    with pytest.raises(RuntimeError, match="source failed"):
+    from app.data_providers.base import ProviderRequestError
+
+    with pytest.raises(ProviderRequestError, match="分钟源 ageman 取数失败") as error:
         kline_sync.sync_minute_batch(["000001.SZ"], on_segment=lambda df: seen.append(df.height))
+    assert str(error.value.__cause__) == "source failed"
     assert seen == [1]
 
 
@@ -140,11 +143,11 @@ def test_global_sync_replays_latest_session_instead_of_only_last_bar(monkeypatch
     monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
     monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
     monkeypatch.setattr(kline_sync, "_latest_minute_datetime",
-                        lambda repo: datetime(2026, 10, 16, 15))
+                        lambda repo, asset_type: datetime(2026, 10, 16, 15))
     captured = []
     monkeypatch.setattr(kline_sync, "sync_minute_batch", lambda *a, **kw: captured.append(kw))
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
-    assert kline_sync.sync_and_persist_minute(["000001.SZ"], repo, CapabilitySet()) == 0
+    assert kline_sync.sync_and_persist_minute(["000001.SZ"], repo, CapabilitySet(), asset_type="stock") == 0
     assert captured[0]["start_time"] == datetime(2026, 10, 16)
 
 

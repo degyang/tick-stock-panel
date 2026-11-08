@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 import polars as pl
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -198,17 +199,8 @@ def _process_is_alive(pid: Any) -> bool:
         return False
     if pid == os.getpid():
         return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (OSError, PermissionError) as exc:
-        # Windows 对不存在的 pid 返回 WinError 87 (ERROR_INVALID_PARAMETER),
-        # 不会映射为 ProcessLookupError; 按存活处理会让孤儿发布锁永远无法恢复。
-        if getattr(exc, "winerror", None) == 87:
-            return False
-        return True
-    return True
+    # Windows interprets signal 0 as a console event, not a read-only probe.
+    return psutil.pid_exists(pid)
 
 
 def _ready_payload(generation: str) -> dict[str, Any]:

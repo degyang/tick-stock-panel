@@ -29,7 +29,7 @@ from app.services.fs_utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
-_PROVIDERS: dict[str, GenericHTTPProvider] = {}
+_PROVIDERS: dict[str, ManagedProvider] = {}
 _LOAD_ERRORS: list[dict] = []
 
 # 内置插件状态: {name: {available, status, runtime, ...}} 供设置页独立分类展示。
@@ -70,7 +70,7 @@ def load_all(path: Path | None = None) -> None:
                 _LOAD_ERRORS.append({"path": str(file), "name": config.name, "errors": errors})
                 provider.close()
                 continue
-            _PROVIDERS[config.name] = provider
+            _PROVIDERS[config.name] = ManagedProvider(provider, builtin=False)
         except Exception as e:  # noqa: BLE001
             logger.warning("custom data source load failed %s: %s", file, e)
             _LOAD_ERRORS.append({"path": str(file), "errors": [str(e)]})
@@ -317,7 +317,7 @@ def errors() -> list[dict]:
     return list(_LOAD_ERRORS)
 
 
-def get_provider(name: str) -> GenericHTTPProvider:
+def get_provider(name: str) -> ManagedProvider:
     provider = _PROVIDERS.get((name or "").lower())
     if provider is None:
         raise ValueError(f"Custom data source not found or invalid: {name}")
@@ -590,6 +590,7 @@ def _manifest_status(manifest, available, reason, origin="builtin"):
         "description": manifest.get("description", ""),
         "install_hint": manifest.get("install_hint", ""),
         "homepage": manifest.get("homepage", ""),
+        "homepage_label": manifest.get("homepage_label", ""),
         "api_key_env": manifest.get("api_key_env", ""),
         "api_key_masked": _plugin_key_masked(name, manifest.get("api_key_env", "")),
         # 计费标识 (可选): 如 "points" → 设置页能力芯片/适配行标注「积分」
@@ -598,8 +599,9 @@ def _manifest_status(manifest, available, reason, origin="builtin"):
         "billing_note": manifest.get("billing_note", ""),
         # 使用要点 (可选): 各能力的规模/节奏说明, 设置页详情卡以列表展示
         "usage_notes": list(manifest.get("usage_notes", []) or []),
-        # Key/账务管理页 (可选): 设置页 Key 配置区展示入口
+        # Key/账务管理页 (可选): 设置页插件详情展示入口
         "key_manage_url": manifest.get("key_manage_url", ""),
+        "key_manage_label": manifest.get("key_manage_label", ""),
     }
 
 

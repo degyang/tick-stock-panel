@@ -58,7 +58,7 @@ def _capture_minute_window(monkeypatch, tmp_path, local_dt: datetime, **kwargs) 
         captured.update(call_kwargs)
         return pl.DataFrame()
 
-    monkeypatch.setattr(kline_sync.preferences, "get_minute_data_provider", lambda: "tickflow")
+    monkeypatch.setattr(kline_sync, "_selected_minute_provider_name", lambda: "tickflow")
     monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
     monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
     monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
@@ -94,7 +94,7 @@ def test_sync_and_persist_minute_incremental_window_is_beijing_wall_clock(monkey
     assert start < end
     assert datetime.fromtimestamp(
         kline_sync._datetime_to_ms(start) / 1000, tz=CN_TZ
-    ) == local_latest.replace(tzinfo=CN_TZ)
+    ) == local_latest.replace(hour=0, minute=0, tzinfo=CN_TZ)
 
 
 def test_sync_and_persist_minute_extend_backward_window_is_beijing_wall_clock(monkeypatch, tmp_path):
@@ -108,7 +108,8 @@ def test_sync_and_persist_minute_extend_backward_window_is_beijing_wall_clock(mo
 
     assert start.utcoffset() == timedelta(hours=8)
     assert end.utcoffset() == timedelta(hours=8)
-    assert end - start == timedelta(days=7)  # 5 交易日 x 7/5
+    assert (start.hour, start.minute) == (9, 25)
+    assert end.date() - start.date() == timedelta(days=7)  # 5 交易日 x 7/5
     assert datetime.fromtimestamp(
         kline_sync._datetime_to_ms(end) / 1000, tz=CN_TZ
     ) == local_earliest.replace(tzinfo=CN_TZ)

@@ -999,6 +999,7 @@ export interface StrategyCodeSaveResult {
 export interface AiIterateRound {
   round: number
   stats: Record<string, number> | null
+  backtest_error?: string | null
   change_summary: string
 }
 
@@ -3547,6 +3548,11 @@ export const api = {
       `/api/watchlist/${encodeURIComponent(symbol)}/group`,
       { method: 'PUT', body: JSON.stringify({ group_id: groupId }) },
     ),
+  watchlistGroupTransfer: (source: string, target: string, symbols: string[], action: 'move' | 'copy') =>
+    request<{ symbols: WatchlistEntry[]; changed: number }>(
+      `/api/watchlist/groups/${encodeURIComponent(source)}/transfer`,
+      { method: 'POST', body: JSON.stringify({ target_group_id: target, symbols, action }), quiet: true },
+    ),
   watchlistGroupAddMember: (groupId: string, symbol: string) =>
     request<{ symbols: WatchlistEntry[] }>(
       `/api/watchlist/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(symbol)}`,
@@ -5097,7 +5103,7 @@ export const api = {
 
   /** 检查 AI 配置状态 */
   strategyAiStatus: () =>
-    request<{ configured: boolean; has_key: boolean; has_model: boolean; provider?: string }>('/api/strategies/ai/status'),
+    request<{ configured: boolean; has_key: boolean; has_model: boolean; provider?: string; supports_tools?: boolean }>('/api/strategies/ai/status'),
 
   /** 测试 AI 连通性 */
   strategyAiTest: () =>
